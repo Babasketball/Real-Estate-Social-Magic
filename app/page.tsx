@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface SocialMediaPosts {
   instagram: string;
@@ -15,6 +15,49 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [posts, setPosts] = useState<SocialMediaPosts | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [credits, setCredits] = useState<number>(0);
+  const [loadingCredits, setLoadingCredits] = useState(true);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    const checkCredits = async () => {
+      try {
+        // Get email from localStorage (set after Stripe checkout)
+        const storedEmail = localStorage.getItem("user_email");
+        setUserEmail(storedEmail);
+
+        if (storedEmail) {
+          const response = await fetch("/api/credits", {
+            headers: {
+              "x-user-email": storedEmail,
+            },
+          });
+          const data = await response.json();
+          setCredits(data.credits || 0);
+        } else {
+          // No email = no credits tracking yet
+          setCredits(0);
+        }
+      } catch (error) {
+        console.error("Error checking credits:", error);
+        setCredits(0);
+      } finally {
+        setLoadingCredits(false);
+      }
+    };
+
+    checkCredits();
+
+    // Check for email updates (e.g., after Stripe checkout)
+    const interval = setInterval(() => {
+      const storedEmail = localStorage.getItem("user_email");
+      if (storedEmail !== userEmail) {
+        checkCredits();
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [userEmail]);
 
   const handleGenerate = async () => {
     if (!propertyDescription.trim()) {
@@ -27,11 +70,18 @@ export default function Home() {
     setPosts(null);
 
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      
+      // Add email header if available
+      if (userEmail) {
+        headers["x-user-email"] = userEmail;
+      }
+
       const response = await fetch("/api/generate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify({ text: propertyDescription }),
       });
 
@@ -42,10 +92,55 @@ export default function Home() {
 
       const data = await response.json();
       setPosts(data);
+      
+      // Refresh credits after generation
+      if (userEmail) {
+        const creditsResponse = await fetch("/api/credits", {
+          headers: {
+            "x-user-email": userEmail,
+          },
+        });
+        const creditsData = await creditsResponse.json();
+        setCredits(creditsData.credits || 0);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleBuyCredits = async () => {
+    try {
+      // Prompt for email if not stored
+      let email = userEmail;
+      if (!email) {
+        email = prompt("Please enter your email address to purchase credits:");
+        if (!email || !email.includes("@")) {
+          setError("Valid email address is required");
+          return;
+        }
+        localStorage.setItem("user_email", email);
+        setUserEmail(email);
+      }
+
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email: email }),
+      });
+
+      const { url } = await response.json();
+
+      if (url) {
+        window.location.href = url;
+      } else {
+        setError("Failed to create checkout session");
+      }
+    } catch (err) {
+      setError("Failed to start checkout process");
     }
   };
 
@@ -75,13 +170,50 @@ export default function Home() {
             placeholder="Enter your property description here..."
             className="w-full h-64 md:h-80 p-4 border-2 border-blue-200 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200 resize-none text-gray-800 placeholder-gray-400"
           />
-          <button
-            onClick={handleGenerate}
-            disabled={isGenerating}
-            className="mt-4 w-full md:w-auto px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg disabled:cursor-not-allowed"
-          >
-            {isGenerating ? "Generating..." : "Generate"}
-          </button>
+          {loadingCredits ? (
+            <button
+              disabled
+              className="mt-4 w-full md:w-auto px-8 py-3 bg-gray-400 text-white font-semibold rounded-lg cursor-not-allowed"
+            >
+              Loading...
+            </button>
+          ) : credits < 10 ? (
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-gray-600">
+                  Credits: <span className="font-semibold text-red-600">{credits}</span>{" "}
+                  {userEmail ? "(Need 10 to generate)" : "(Enter email at checkout to track credits)"}
+                </span>
+              </div>
+              <button
+                onClick={handleBuyCredits}
+                className="w-full md:w-auto px-8 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+              >
+                Buy 10 Credits - $5.00
+              </button>
+              <p className="mt-2 text-sm text-gray-500">
+                Each prompt costs 10 credits ($5).
+              </p>
+            </div>
+          ) : (
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-gray-600">
+                  Credits: <span className="font-semibold text-blue-600">{credits}</span>
+                </span>
+              </div>
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating}
+                className="w-full md:w-auto px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg disabled:cursor-not-allowed"
+              >
+                {isGenerating ? "Generating..." : "Generate"}
+              </button>
+              <p className="mt-2 text-sm text-gray-500">
+                Each prompt costs 10 credits ($5).
+              </p>
+            </div>
+          )}
         </div>
 
         {error && (

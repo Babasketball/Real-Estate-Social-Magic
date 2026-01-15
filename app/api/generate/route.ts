@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { createClient } from "@/utils/supabase/server";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -22,6 +23,40 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Property description text is required" },
         { status: 400 }
+      );
+    }
+
+    // Check for email-based credits (no login required)
+    const email = request.headers.get("x-user-email") || null;
+
+    if (!email) {
+      return NextResponse.json(
+        { error: "Email is required to track credits. Please buy credits to generate posts." },
+        { status: 403 }
+      );
+    }
+
+    const supabase = await createClient();
+
+    // Get credits by email (stored from Stripe checkout)
+    const { data: userCredits, error: creditsError } = await supabase
+      .from("user_credits")
+      .select("credits")
+      .eq("email", email)
+      .single();
+
+    // If no record, treat as 0 credits
+    if (creditsError && creditsError.code !== "PGRST116") {
+      console.error("Error fetching credits:", creditsError);
+    }
+
+    const credits = userCredits?.credits || 0;
+
+    // 1 generation costs 10 credits
+    if (credits < 10) {
+      return NextResponse.json(
+        { error: "Insufficient credits. You need 10 credits to generate posts. Please purchase credits." },
+        { status: 403 }
       );
     }
 
@@ -72,6 +107,29 @@ export async function POST(request: NextRequest) {
         { status: 500 }
       );
     }
+
+    // Deduct 10 credits after successful generation (1 generation = 10 credits)
+    const { data: updatedCredits } = await supabase
+      .from("user_credits")
+      .select("credits")
+      .eq("email", email)
+      .single();
+
+    const currentCredits = updatedCredits?.credits || 0;
+    const newCredits = Math.max(0, currentCredits - 10);
+
+    await supabase
+      .from("user_credits")
+      .upsert(
+        {
+          email: email,
+          credits: newCredits,
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "email",
+        }
+      );
 
     return NextResponse.json(parsedContent);
   } catch (error) {
